@@ -1,5 +1,6 @@
 #Requests permite enviar peticiones HTTP de manera sencilla, 
 # mientras que BeautifulSoup permite parsear y extraer información de documentos HTML y XML.
+import os
 from celery import Celery
 import requests, time, random
 from bs4 import BeautifulSoup
@@ -7,14 +8,26 @@ from sqlmodel import Session,select
 from urllib.parse import urljoin
 from models import URL_CONNECTION, engine, Noticias, create_db_and_tables
 from celery.schedules import crontab
+from google import genai 
+
+BROKER_URL = os.getenv("BROKER_URL")
+API_KEY = os.getenv("API_KEY")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+client = genai.Client(api_key=API_KEY)
+PALABRAS_CLAVE = ["inflación", "tasas de interés", "desempleo", "PIB", "recesión","mercado financiero", "inversión extranjera", "déficit fiscal", "endeudamiento público", "vaca muerta","criptomonedas","bitcoin","ypf","acciones argentinas","cedears","licitación","licitacion","licitaciones","dólar","riesgo país"]
+
+
+
+
 
 app = Celery(
     "tasks",
     backend=f"db+{URL_CONNECTION}",
-    broker='pyamqp://guest@localhost//'
+    broker=BROKER_URL
 )
 
-# La configuración para el reloj automático
+# configuración para el reloj automático
 app.conf.beat_schedule = {
     "extraer-minuto-ambito":{
        "task": "celery_app.extraer_ambito",
@@ -71,10 +84,35 @@ def extraer_noticias_infobae():
                                 titulo = texto_limpio,
                                 url = url_completa,
                                 cuerpo = cuerpo
-                            )
+                            )    
                             db.add(nueva_noticia)
                             db.commit()
                             tiempo_espera = random.uniform(2.3,4.5)
+
+                            #SEPARAR EN UN PROCESO PARA EVITAR REPETIR CODIGO
+                            
+                            if any(palabra in cuerpo.lower() for palabra in PALABRAS_CLAVE): 
+                                max_reintentos = 3
+                                for intento in range(max_reintentos):
+                                    try:
+                                        print("Generando resumen...") 
+                                        prompt = f"[ROL] Toma el papel de un analista económico y financiero. Tu tarea es generar un resumen de noticias económicas y financieras, destacando los puntos clave y proporcionando un análisis conciso y claro. El resumen debe ser fácil de entender para un público general, evitando tecnicismos innecesarios.\n\n[INSTRUCCIONES] Genera un resumen de la siguiente noticia, con un lenguaje claro, corto, conciso, directo y que sea fácil de entender para un público general. El resumen debe ayudar a la toma de decisiones e invitarte a seguir leyendo si te interesa saber más. La noticia es la siguiente: {cuerpo}\n\n[RSTRICCIONES] No uses lenguaje cliché. Mantené un tono serio y profesional en todo momento."
+                                        interaction = client.interactions.create(
+                                            model="gemini-3.8-flash",
+                                            input=prompt
+                                        )
+                                        resumen = interaction.output_text
+                                        print("Resumen generado con éxito.")
+                                        #Envio de mensaje mediante bot de Telegram
+                                        mensaje = f"🚨🗞 *{nueva_noticia.titulo}*\n\n📝  {resumen}\n\n🔗 {url_completa}"
+                                        requests.post(
+                                            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                            data={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
+                                        )
+                                        break
+                                    except Exception as e:
+                                        tiempo_espera = 15
+                                        print(f"Saturación en API (intento {intento + 1}/{max_reintentos}). Esperando {tiempo_espera}s...")
                             time.sleep(tiempo_espera) # tiempo de espera para simular comportamiento humano
                         else:
                             print(f"se detectó noticia repetida: {texto_limpio}")
@@ -109,10 +147,38 @@ def extraer_tn():
                             statement = select(Noticias).where(Noticias.url == url_completa)
                             noticia_existente = db.exec(statement).first()
                             if not noticia_existente:
-                                nueva_noticia = Noticias(titulo=titulo, url=url_completa, cuerpo=cuerpo)
+                                nueva_noticia = Noticias(
+                                    titulo=titulo, 
+                                    url=url_completa, 
+                                    cuerpo=cuerpo
+                                )
                                 db.add(nueva_noticia)
                                 db.commit()
                                 tiempo_espera = random.uniform(2.3,4.5)
+
+
+                                if any(palabra in cuerpo.lower() for palabra in PALABRAS_CLAVE): 
+                                    max_reintentos = 3
+                                    for intento in range(max_reintentos):
+                                        try:
+                                            print("Generando resumen...") 
+                                            prompt = f"[ROL] Toma el papel de un analista económico y financiero. Tu tarea es generar un resumen de noticias económicas y financieras, destacando los puntos clave y proporcionando un análisis conciso y claro. El resumen debe ser fácil de entender para un público general, evitando tecnicismos innecesarios.\n\n[INSTRUCCIONES] Genera un resumen de la siguiente noticia, con un lenguaje claro, corto, conciso, directo y que sea fácil de entender para un público general. El resumen debe ayudar a la toma de decisiones e invitarte a seguir leyendo si te interesa saber más. La noticia es la siguiente: {cuerpo}\n\n[RSTRICCIONES] No uses lenguaje cliché. Mantené un tono serio y profesional. "
+                                            interaction = client.interactions.create(
+                                                model="gemini-3.8-flash",
+                                                input=prompt
+                                            )
+                                            resumen = interaction.output_text
+                                            print("Resumen generado con éxito.")
+                                            #Envio de mensaje mediante bot de Telegram
+                                            mensaje = f"🚨🗞 *{nueva_noticia.titulo}*\n\n📝 {resumen}\n\n🔗 {url_completa}"
+                                            requests.post(
+                                                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                                data={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
+                                            )
+                                            break
+                                        except Exception as e:
+                                            tiempo_espera = 15
+                                            print(f"Saturación en API (intento {intento + 1}/{max_reintentos}). Esperando {tiempo_espera}s...")
                                 time.sleep(tiempo_espera) # tiempo de espera para simular comportamiento humano
                             else:
                                 print(f"se detecto noticia repetida: {titulo}")
@@ -158,6 +224,30 @@ def extraer_ambito():
                                     db.add(nueva_noticia)
                                     db.commit()
                                     tiempo_espera = random.uniform(2.3,4.5)
+                
+                                    if any(palabra in contenido.lower() for palabra in PALABRAS_CLAVE): 
+                                        print("Generando resumen...") 
+                                        max_reintentos = 3
+                                        for intento in range(max_reintentos):
+                                            try:
+                                                prompt = f"[ROL] Toma el papel de un analista económico y financiero. Tu tarea es generar un resumen de noticias económicas y financieras, destacando los puntos clave y proporcionando un análisis conciso y claro. El resumen debe ser fácil de entender para un público general, evitando tecnicismos innecesarios.\n\n[INSTRUCCIONES] Genera un resumen de la siguiente noticia, con un lenguaje claro, corto, conciso, directo y que sea fácil de entender para un público general. El resumen debe ayudar a la toma de decisiones e invitarte a seguir leyendo si te interesa saber más. La noticia es la siguiente: {contenido}\n\n[RSTRICCIONES] No uses lenguaje cliché. Mantené un tono serio y profesional. "
+                                                interaction = client.interactions.create(
+                                                    model="gemini-3.8-flash",
+                                                    input=prompt
+                                                )
+                                                resumen = interaction.output_text
+                                                print("Resumen generado con éxito.")
+                                                #Envio de mensaje mediante bot de Telegram
+                                                mensaje = f"🚨🗞 *{nueva_noticia.titulo}*\n\n📝 {resumen}\n\n🔗 {url_completa}"
+                                                requests.post(
+                                                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                                    data={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
+                                                )
+                                                break
+                                            except Exception as e:
+                                                tiempo_espera = 15
+                                                print(f"Saturación en API (intento {intento + 1}/{max_reintentos}). Esperando {tiempo_espera}s...")
+                                                time.sleep(tiempo_espera)
                                     time.sleep(tiempo_espera) # tiempo de espera para simular comportamiento humano
                                 else:
                                     print(f"se deteco noticia repetida: {titulo}")
